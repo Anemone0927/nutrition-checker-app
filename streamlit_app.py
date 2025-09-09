@@ -132,7 +132,7 @@ st.markdown("""
     }
     
     div[data-testid="stButton"] button:hover {
-        background-color: #4B3832 !important;
+        background-color: #876358 !important;
     }
 
     /* Multiselect and text input styles */
