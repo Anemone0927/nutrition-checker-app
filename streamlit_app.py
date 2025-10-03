@@ -141,11 +141,12 @@ st.markdown("""
         border-radius: 12px;
     }
 
-    /* Multiselect で選択された項目（赤いチップ）のスタイル変更 */
-    .stMultiSelect div[data-testid="stMultiSelect"] div div > div:nth-child(1) {
-        background-color: #F0A0B0 !important; /* 落ち着いた桃色 */
-        color: #5C3D2E !important;   /* 文字色を濃い茶色に */
-        border: none !important;
+    /* 修正案 1: 選択された項目（チップ）の背景色を強制的に上書き */
+    div[data-testid="stMultiSelect"] > div > div:nth-child(1) > div:nth-child(1) {
+        /* 落ち着いた桃色 */
+        background-color: #F0A0B0 !important;
+        /* 角を少し丸く */
+        border-radius: 8px !important;
     }
 
     /* Info and success boxes */
