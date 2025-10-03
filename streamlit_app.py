@@ -141,13 +141,6 @@ st.markdown("""
         border-radius: 12px;
     }
 
-    /* 修正案 1: 選択された項目（チップ）の背景色を強制的に上書き */
-    div[data-testid="stMultiSelect"] > div > div:nth-child(1) > div:nth-child(1) {
-        /* 落ち着いた桃色 */
-        background-color: #F0A0B0 !important;
-        /* 角を少し丸く */
-        border-radius: 8px !important;
-    }
 
     /* Info and success boxes */
     .stAlert {
