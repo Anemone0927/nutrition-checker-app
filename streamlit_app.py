@@ -5,6 +5,153 @@ import random
 import plotly.graph_objects as go
 from PIL import Image
 
+# ----------------------------------------------------
+# 1. Firebase Admin SDK のインポートと初期化
+# ----------------------------------------------------
+# Firebase Admin SDK のインポート
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    import json
+except ImportError:
+    # firebase-adminがインストールされていない場合の処理（ローカル実行で未インストール時）
+    firebase_admin = None
+    credentials = None
+    firestore = None
+    json = None
+
+# Firebase関連のセッションステートを初期化
+if 'db' not in st.session_state:
+    st.session_state.db = None
+    st.session_state.auth_ready = False
+    st.session_state.user_id = "default_user" # 認証前の仮ID
+if 'history' not in st.session_state:
+    st.session_state['history'] = {} # データベースから読み込まれた過去の記録用
+
+def initialize_firebase():
+    """
+    Firebase Admin SDKを初期化する。
+    Streamlit Cloud のシークレットまたはローカルの JSON ファイルから認証情報を取得。
+    """
+    if st.session_state.db is not None:
+        # すでに初期化済みなら何もしない
+        return
+
+    if firebase_admin is None:
+        st.session_state.auth_ready = False
+        return
+
+    # Streamlit Cloud のシークレットから認証情報を取得 (デプロイ環境向け)
+    try:
+        if st.secrets.get("firebase", {}):
+            creds_dict = dict(st.secrets["firebase"])
+            cred = credentials.Certificate(creds_dict)
+            
+            if not firebase_admin.apps:
+                firebase_admin.initialize_app(cred)
+            
+            st.session_state.db = firestore.client()
+            st.session_state.auth_ready = True
+            # Streamlit SecretsからユーザーIDを取得
+            st.session_state.user_id = st.secrets.get("app", {}).get("user_id", "streamlit_cloud_user") 
+            st.success("Firebaseに接続しました。")
+            return
+
+    except Exception:
+        # シークレットの読み込みに失敗した場合、ローカル向けの代替パスに進む
+        pass
+
+        
+    # ローカル開発環境向けのフォールバック（認証情報をJSONファイルとして保存している場合）
+    try:
+        import os
+        if os.path.exists("serviceAccountKey.json"):
+            if not firebase_admin.apps:
+                cred = credentials.Certificate("serviceAccountKey.json") 
+                firebase_admin.initialize_app(cred)
+                
+            st.session_state.db = firestore.client()
+            st.session_state.auth_ready = True
+            st.session_state.user_id = "local_developer_user" 
+            st.info("ローカルファイルからFirebaseに接続しました。（デプロイ時はSecretsが必要です）")
+            return
+    
+    except Exception as e:
+        st.warning(f"Firebaseの初期化に失敗しました。データベース保存機能は無効です。 ({e})")
+    
+    # どちらも失敗した場合
+    st.session_state.db = None
+    st.session_state.auth_ready = False
+
+# ----------------------------------------------------
+# 2. データ保存・読み込み機能の定義
+# ----------------------------------------------------
+def save_nutrition_data(meal_type, nutrition_data):
+    """
+    現在の食事の栄養データをFirestoreに保存する。
+    """
+    if not st.session_state.auth_ready or st.session_state.db is None:
+        st.error("データベース接続が未完了のため保存できません。")
+        return
+
+    try:
+        # コレクションパスを定義: users/{userId}/records/{meal_type}
+        doc_ref = st.session_state.db.collection('users').document(st.session_state.user_id).collection('records').document(meal_type)
+        
+        # ユーザーのコードに合わせたキー名で保存
+        data_to_save = {
+            'meal_type': meal_type,
+            'calories': nutrition_data.get('calories', 0),
+            'protein': nutrition_data.get('protein', 0),
+            'fat': nutrition_data.get('fat', 0),
+            'carbohydrates': nutrition_data.get('carbohydrates', 0),
+            'timestamp': firestore.SERVER_TIMESTAMP # サーバー側で保存時刻を記録
+        }
+        
+        doc_ref.set(data_to_save)
+        st.session_state.history[meal_type] = nutrition_data # 履歴も更新
+        st.success(f"✅ {meal_type}の栄養データをクラウドに保存しました！")
+        st.session_state.data_added = True # 保存後、グラフを再表示するため
+        # Streamlitの再実行をトリガー
+        st.rerun() 
+
+    except Exception as e:
+        st.error(f"データ保存中にエラーが発生しました: {e}")
+
+def load_nutrition_data():
+    """
+    Firestoreから過去の栄養データを読み込む。
+    """
+    if not st.session_state.auth_ready or st.session_state.db is None:
+        return {} # データベースが使えない場合は空の辞書を返す
+
+    loaded_data = {}
+    try:
+        # ユーザーの全記録を取得
+        collection_ref = st.session_state.db.collection('users').document(st.session_state.user_id).collection('records')
+        docs = collection_ref.stream()
+
+        for doc in docs:
+            data = doc.to_dict()
+            meal_type = doc.id 
+            # ユーザーのsession_stateのキー名に合わせて変換
+            loaded_data[meal_type] = {
+                'calories': data.get('calories', 0),
+                'protein': data.get('protein', 0),
+                'fat': data.get('fat', 0),
+                'carbohydrates': data.get('carbohydrates', 0)
+            }
+        return loaded_data
+
+    except Exception as e:
+        # 最初の読み込み失敗は警告に留める
+        # st.error(f"データ読み込み中にエラーが発生しました: {e}")
+        return {}
+
+# Firebaseの初期化を実行
+initialize_firebase()
+
+
 # DeprecationWarningを無視
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
@@ -31,6 +178,11 @@ if 'data_added' not in st.session_state:
     st.session_state.data_added = False
 if 'chart_reset' not in st.session_state:
     st.session_state.chart_reset = False
+
+# データベースから過去の履歴を読み込み（Firebase初期化後に実行）
+if st.session_state.auth_ready and not st.session_state.history:
+    st.session_state.history = load_nutrition_data()
+
 
 # Load nutrition data from CSV
 try:
@@ -159,6 +311,30 @@ st.markdown("""
 # File uploader
 uploaded_file = st.file_uploader("画像をアップロード", type=["jpg", "jpeg", "png"])
 
+# ----------------------------------------------------
+# 3. UIへのデータ保存ボタンの統合
+# ----------------------------------------------------
+st.markdown(f"**現在のユーザーID:** `{st.session_state.user_id}`")
+
+if st.session_state.auth_ready and st.session_state.last_selected_meal_type and st.session_state.data_added:
+    # 接続済みで、一度でも計算が実行されたらボタンを表示
+    save_button_key = f"save_btn_{st.session_state.last_selected_meal_type}_{st.session_state.total_nutrition_for_day['calories']}"
+    
+    # on_clickで保存関数を呼び出し、引数に食事タイプと直近の栄養情報を渡す
+    st.button(
+        f"{st.session_state.last_selected_meal_type}の記録を保存", 
+        key=save_button_key, 
+        on_click=save_nutrition_data, 
+        args=(st.session_state.last_selected_meal_type, st.session_state.last_added_nutrition), 
+        type='secondary'
+    )
+elif not st.session_state.auth_ready:
+    # 接続情報がない場合の警告
+    st.warning("データベース接続待ち、または未設定のため、データ保存はできません。")
+
+st.write("---") # 区切り線
+
+
 if uploaded_file is not None:
     st.image(uploaded_file, caption='アップロードされた画像', use_container_width=True)
     st.success("画像を受け取りました！")
@@ -169,7 +345,9 @@ if uploaded_file is not None:
     # Meal type selection
     selected_meal_type = st.selectbox(
         "どの食事ですか？",
-        options=list(meal_ratios.keys())
+        options=list(meal_ratios.keys()),
+        # 最後に選択した食事タイプを維持
+	index=list(meal_ratios.keys()).index(st.session_state.last_selected_meal_type) if st.session_state.last_selected_meal_type else 0
     )
     
     selected_categories = st.multiselect(
@@ -194,7 +372,7 @@ if uploaded_file is not None:
     )
 
     # Action button to add nutrition
-    if st.button("栄養情報を計算"):
+    if st.button("栄養情報を計算", type='primary'):
         if not selected_foods:
             st.warning("料理が選択されていません。")
         else:
@@ -416,3 +594,18 @@ if uploaded_file is not None:
                 )
             )
             st.session_state.chart_reset = False
+
+# ----------------------------------------------------
+# 4. サイドバーに過去の記録を表示
+# ----------------------------------------------------
+if st.session_state['history']:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("過去の保存データ")
+    
+    # 過去の記録をサイドバーに表示
+    for meal, data in st.session_state['history'].items():
+        st.sidebar.markdown(f"**{meal}**")
+        st.sidebar.text(f"  カロリー: {data['calories']:.0f} kcal")
+        st.sidebar.text(f"  たんぱく質: {data['protein']:.1f} g")
+    st.sidebar.caption("これらのデータはデータベースから読み込まれています。")
+
