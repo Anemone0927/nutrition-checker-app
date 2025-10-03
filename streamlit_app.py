@@ -122,7 +122,7 @@ st.markdown("""
     
     /* Button styles */
     div[data-testid="stButton"] button {
-        background-color: #5C3D2E !important;
+        background-color: #876358 !important;
         color: #FFF !important;
         border-radius: 12px !important;
         border: none !important;
@@ -137,8 +137,15 @@ st.markdown("""
 
     /* Multiselect and text input styles */
     .stMultiSelect, .stSelectbox {
-        background-color: #F8F4F0;
+        background-color: #e3bd96;
         border-radius: 12px;
+    }
+
+    /* Multiselect で選択された項目（赤いチップ）のスタイル変更 */
+    .stMultiSelect div[data-testid="stMultiSelect"] div div > div:nth-child(1) {
+        background-color: #F0A0B0 !important; /* 落ち着いた桃色 */
+        color: #5C3D2E !important;   /* 文字色を濃い茶色に */
+        border: none !important;
     }
 
     /* Info and success boxes */
