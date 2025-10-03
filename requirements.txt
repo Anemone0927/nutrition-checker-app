@@ -1,6 +1,5 @@
 streamlit
 pandas
 plotly
-
-Firebase/Firestore のためのライブラリを追加
+Pillow
 firebase-admin
