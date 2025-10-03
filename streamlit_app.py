@@ -45,6 +45,12 @@ def initialize_firebase():
     try:
         if st.secrets.get("firebase", {}):
             creds_dict = dict(st.secrets["firebase"])
+            # ここで private_key の改行文字（\n）が適切に読み込まれているかを確認
+            
+            # ログ出力（デバッグ用）
+            # st.info(f"Secrets読み込み成功。Project ID: {creds_dict.get('project_id')}")
+            # st.info(f"Private Keyの先頭10文字: {creds_dict.get('private_key', 'N/A')[:10]}")
+            
             cred = credentials.Certificate(creds_dict)
             
             if not firebase_admin.apps:
@@ -54,10 +60,13 @@ def initialize_firebase():
             st.session_state.auth_ready = True
             # Streamlit SecretsからユーザーIDを取得
             st.session_state.user_id = st.secrets.get("app", {}).get("user_id", "streamlit_cloud_user") 
-            st.success("Firebaseに接続しました。")
+            st.success("✅ Firebaseに接続しました！")
             return
 
-    except Exception:
+    except Exception as e:
+        # 接続失敗時にエラーメッセージを表示
+        st.error(f"🔴 Firebase Secretsの読み込みと初期化に失敗しました。認証情報（Secrets）を確認してください。エラー: {e}")
+        st.session_state.auth_ready = False # 念のためFalseを設定し続ける
         # シークレットの読み込みに失敗した場合、ローカル向けの代替パスに進む
         pass
 
@@ -77,8 +86,10 @@ def initialize_firebase():
             return
     
     except Exception as e:
-        st.warning(f"Firebaseの初期化に失敗しました。データベース保存機能は無効です。 ({e})")
-    
+        # 最後のフォールバックも失敗した場合
+        if st.session_state.auth_ready == False: # Secretsでのエラーがなければ、ここで初めて警告を出す
+             st.warning(f"Firebaseの初期化に失敗しました。データベース保存機能は無効です。 ({e})")
+        
     # どちらも失敗した場合
     st.session_state.db = None
     st.session_state.auth_ready = False
@@ -609,4 +620,3 @@ if st.session_state['history']:
         st.sidebar.text(f"  カロリー: {data['calories']:.0f} kcal")
         st.sidebar.text(f"  たんぱく質: {data['protein']:.1f} g")
     st.sidebar.caption("これらのデータはデータベースから読み込まれています。")
-
