@@ -46,14 +46,10 @@ def initialize_firebase():
     try:
         if st.secrets.get("firebase", {}):
             creds_dict = dict(st.secrets["firebase"])
-            # 【重要】private_key内の改行コードを確実に復元する処理を追加
-            # Streamlit Secretsで'\n'として保存された文字列を実際の改行コードに変換
+            # 【重要】Secretsのprivate_keyが一行で入力された場合のために、
+            # エスケープされた改行コード（\n）を実際の改行コードに強制的に変換します。
             if 'private_key' in creds_dict and isinstance(creds_dict['private_key'], str):
-                # creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
-                # Admin SDKのcredentials.Certificateは辞書を渡した場合、自動で処理するため、
-                # Secretsに「\n」で保存されていればそのまま渡すだけで通常はOKです。
-                # ただし、失敗しているため、念のため明示的な改行コードの処理をコメントアウトして残します。
-                pass 
+                creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
             
             cred = credentials.Certificate(creds_dict)
             
