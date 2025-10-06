@@ -295,10 +295,14 @@ if st.session_state.auth_ready and not st.session_state.history:
     st.session_state.history = load_nutrition_data()
 
 
-# Load nutrition data from CSV (既存のロジックを維持)
+# Load nutrition data from CSV
 try:
     df = pd.read_csv("food_nutrition.csv")
-    nutrition_dict = df.set_index('food').T.to_dict()
+    
+    # 🌟 修正点: 'food' 列で重複がある行を削除し、最後の行のデータを採用
+    df_cleaned = df.drop_duplicates(subset=['food'], keep='last')
+    
+    nutrition_dict = df_cleaned.set_index('food').T.to_dict()
     available_foods = list(nutrition_dict.keys())
 except FileNotFoundError:
     st.error("エラー: 'food_nutrition.csv' ファイルが見つかりません。")
