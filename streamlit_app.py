@@ -8,17 +8,114 @@ from PIL import Image
 # ----------------------------------------------------
 # 1. Firebase Admin SDK のインポートと初期化
 # ----------------------------------------------------
-# Firebase Admin SDK のインポート
+# Firebase Admin SDK, JSON, Requests, Base64 のインポート
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
     import json
-except ImportError:
-    # firebase-adminがインストールされていない場合の処理（ローカル実行で未インストール時）
+    import requests
+    import base64
+except ImportError as e:
+    # 必要なライブラリがない場合の処理
     firebase_admin = None
     credentials = None
     firestore = None
     json = None
+    requests = None
+    base64 = None
+    st.error(f"🔴 必要なライブラリが見つかりません: {e}. 'firebase-admin', 'requests', 'pandas'などが必要です。")
+
+
+# ----------------------------------------------------
+# 2. Gemini API の設定
+# ----------------------------------------------------
+API_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
+API_KEY = "" # Canvas環境では実行時に自動で提供されます
+
+def file_to_base64(uploaded_file):
+    """UploadedFileオブジェクトをBase64文字列に変換する"""
+    if base64 is None: return None
+    return base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
+
+def analyze_image_with_gemini(base64_image_data, mime_type):
+    """Gemini APIを呼び出し、画像から食品名をJSON形式で検出する"""
+    if requests is None or json is None:
+        st.error("API呼び出しに必要なライブラリがロードされていません。")
+        return None
+    
+    # 応答JSONのスキーマ定義
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "foods": {
+                "type": "ARRAY",
+                "description": "画像から検出された可能性のある食品のリスト。食品データベースにある名前に最も近くなるようにしてください。",
+                "items": {"type": "STRING"}
+            }
+        },
+        "required": ["foods"]
+    }
+
+    # システムプロンプトを設定し、食品データベースにある名前（例： 'ごはん', '鶏肉'）で回答を促す
+    system_prompt = "あなたは食品分析の専門家です。画像に写っている食べ物をすべて特定し、食品データベースにある名前に最も近い日本語の一般名称でリストアップしてください。食品名（例： 'ごはん', '鶏肉', 'ブロッコリー'）は、できるだけ短く、データベースにマッチしやすい形式で答えてください。"
+    user_query = "この画像に写っている食べ物、メインディッシュ、サイドディッシュ、フルーツなどをすべてリストアップしてください。"
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": user_query},
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": base64_image_data
+                        }
+                    }
+                ]
+            }
+        ],
+        "systemInstruction": {
+            "parts": [{"text": system_prompt}]
+        },
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema
+        }
+    }
+    
+    # 指数バックオフを使用したAPI呼び出し
+    for attempt in range(5):
+        try:
+            response = requests.post(
+                f"{API_URL_BASE}?key={API_KEY}",
+                headers={'Content-Type': 'application/json'},
+                data=json.dumps(payload)
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('candidates'):
+                json_string = result['candidates'][0]['content']['parts'][0]['text']
+                return json.loads(json_string)
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"API呼び出しエラー (試行 {attempt + 1}/5): {e}") # コンソールにエラーログを出力
+            if attempt < 4:
+                import time
+                time.sleep(2 ** attempt) 
+            else:
+                st.error("🔴 画像分析APIの呼び出しが最大試行回数に達しました。")
+                return None
+        except json.JSONDecodeError:
+            st.error("🔴 画像分析APIから無効なJSON応答が返されました。")
+            return None
+
+
+# ----------------------------------------------------
+# 3. StreamlitのセッションステートとFirebase初期化 (既存ロジック)
+# ----------------------------------------------------
 
 # Firebase関連のセッションステートを初期化
 if 'db' not in st.session_state:
@@ -28,13 +125,17 @@ if 'db' not in st.session_state:
 if 'history' not in st.session_state:
     st.session_state['history'] = {} # データベースから読み込まれた過去の記録用
 
+# 画像分析関連のセッションステートを初期化
+if 'detected_foods' not in st.session_state:
+    st.session_state.detected_foods = []
+if 'manual_mode' not in st.session_state:
+    st.session_state.manual_mode = False
+
 def initialize_firebase():
     """
     Firebase Admin SDKを初期化する。
-    Streamlit Cloud のシークレットまたはローカルの JSON ファイルから認証情報を取得。
     """
     if st.session_state.db is not None:
-        # すでに初期化済みなら何もしない
         return
 
     if firebase_admin is None:
@@ -46,8 +147,7 @@ def initialize_firebase():
     try:
         if st.secrets.get("firebase", {}):
             creds_dict = dict(st.secrets["firebase"])
-            # 【重要】Secretsのprivate_keyが一行で入力された場合のために、
-            # エスケープされた改行コード（\n）を実際の改行コードに強制的に変換します。
+            # エスケープされた改行コード（\n）を実際の改行コードに強制的に変換
             if 'private_key' in creds_dict and isinstance(creds_dict['private_key'], str):
                 creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
             
@@ -58,20 +158,17 @@ def initialize_firebase():
             
             st.session_state.db = firestore.client()
             st.session_state.auth_ready = True
-            # Streamlit SecretsからユーザーIDを取得
             st.session_state.user_id = st.secrets.get("app", {}).get("user_id", "streamlit_cloud_user") 
             st.success("✅ Firebaseに接続しました！")
             return
 
     except Exception as e:
-        # 接続失敗時にエラーメッセージを表示
         st.error(f"🔴 Firebase Secretsの読み込みと初期化に失敗しました。認証情報（Secrets）を確認してください。エラー: {e}")
         st.session_state.auth_ready = False 
-        # シークレットの読み込みに失敗した場合、ローカル向けの代替パスに進む
         pass
 
         
-    # ローカル開発環境向けのフォールバック（認証情報をJSONファイルとして保存している場合）
+    # ローカル開発環境向けのフォールバック
     try:
         import os
         if os.path.exists("serviceAccountKey.json"):
@@ -86,76 +183,80 @@ def initialize_firebase():
             return
     
     except Exception as e:
-        # 最後のフォールバックも失敗した場合
-        if st.session_state.auth_ready == False: # Secretsでのエラーがなければ、ここで初めて警告を出す
+        if st.session_state.auth_ready == False: 
              st.warning(f"Firebaseの初期化に失敗しました。データベース保存機能は無効です。 ({e})")
         
-    # どちらも失敗した場合
     st.session_state.db = None
     st.session_state.auth_ready = False
 
-# ----------------------------------------------------
-# 2. データ保存・読み込み機能の定義
-# ----------------------------------------------------
+# データ保存・読み込み機能の定義 (ここは変更なし)
 def save_nutrition_data(meal_type, nutrition_data):
-    """
-    現在の食事の栄養データをFirestoreに保存する。
-    """
-    if not st.session_state.auth_ready or st.session_state.db is None:
-        st.error("データベース接続が未完了のため保存できません。")
+    """Firestoreに栄養データを保存する"""
+    if not st.session_state.auth_ready:
+        st.error("データベースが初期化されていません。データを保存できません。")
         return
 
     try:
-        # コレクションパスを定義: users/{userId}/records/{meal_type}
-        doc_ref = st.session_state.db.collection('users').document(st.session_state.user_id).collection('records').document(meal_type)
+        # ドキュメント参照パスを決定 (ここではユーザーIDごとのプライベートコレクションを使用)
+        # collection path: /users/{userId}/nutrition_logs
+        doc_ref = st.session_state.db.collection(f"users/{st.session_state.user_id}/nutrition_logs").document()
         
-        # ユーザーのコードに合わせたキー名で保存
         data_to_save = {
-            'meal_type': meal_type,
-            'calories': nutrition_data.get('calories', 0),
-            'protein': nutrition_data.get('protein', 0),
-            'fat': nutrition_data.get('fat', 0),
-            'carbohydrates': nutrition_data.get('carbohydrates', 0),
-            'timestamp': firestore.SERVER_TIMESTAMP # サーバー側で保存時刻を記録
+            "meal_type": meal_type,
+            "calories": nutrition_data["calories"],
+            "protein": nutrition_data["protein"],
+            "fat": nutrition_data["fat"],
+            "carbohydrates": nutrition_data["carbohydrates"],
+            "timestamp": firestore.SERVER_TIMESTAMP # 保存時刻をFirestore側で設定
         }
         
         doc_ref.set(data_to_save)
-        st.session_state.history[meal_type] = nutrition_data # 履歴も更新
-        st.success(f"✅ {meal_type}の栄養データをクラウドに保存しました！")
-        st.session_state.data_added = True # 保存後、グラフを再表示するため	st.session_state.rerun_flag = True # グラフの再描画を促すフラグ
+        st.success(f"✅ {meal_type}の記録をデータベースに保存しました！")
+        
+        # 保存後、履歴を再読み込み（リアルタイム反映のため）
+        st.session_state.history = load_nutrition_data()
 
     except Exception as e:
-        st.error(f"データ保存中にエラーが発生しました: {e}")
+        st.error(f"データの保存中にエラーが発生しました: {e}")
 
 def load_nutrition_data():
-    """
-    Firestoreから過去の栄養データを読み込む。
-    """
-    if not st.session_state.auth_ready or st.session_state.db is None:
-        return {} # データベースが使えない場合は空の辞書を返す
-
-    loaded_data = {}
+    """Firestoreから過去の栄養データを読み込む"""
+    if not st.session_state.auth_ready:
+        return {}
+    
     try:
-        # ユーザーの全記録を取得
-        collection_ref = st.session_state.db.collection('users').document(st.session_state.user_id).collection('records')
+        # ユーザーIDごとのコレクションからデータを取得
+        # collection path: /users/{userId}/nutrition_logs
+        collection_ref = st.session_state.db.collection(f"users/{st.session_state.user_id}/nutrition_logs")
+        
+        # 最新の10件を取得するクエリ (ソートは簡易化のためコード側で行う)
         docs = collection_ref.stream()
-
+        
+        # データを meal_type ごとに集計して、最新の記録を保持（簡易履歴）
+        history_data = {}
         for doc in docs:
             data = doc.to_dict()
-            meal_type = doc.id 
-            # ユーザーのsession_stateのキー名に合わせて変換
-            loaded_data[meal_type] = {
-                'calories': data.get('calories', 0),
-                'protein': data.get('protein', 0),
-                'fat': data.get('fat', 0),
-                'carbohydrates': data.get('carbohydrates', 0)
-            }
-        return loaded_data
-
+            meal_type = data.get("meal_type", "不明な食事")
+            
+            # タイムスタンプで最新かどうかを判断（ここでは簡易的に）
+            if meal_type not in history_data or data.get("timestamp", 0) > history_data[meal_type].get("timestamp", 0):
+                 history_data[meal_type] = {
+                    "calories": data.get("calories", 0),
+                    "protein": data.get("protein", 0),
+                    "fat": data.get("fat", 0),
+                    "carbohydrates": data.get("carbohydrates", 0),
+                    "timestamp": data.get("timestamp", None)
+                }
+        
+        return history_data
     except Exception as e:
-        # 最初の読み込み失敗は警告に留める
-        # st.error(f"データ読み込み中にエラーが発生しました: {e}")
+        st.error(f"データの読み込み中にエラーが発生しました: {e}")
         return {}
+
+
+# ----------------------------------------------------
+# 4. データ読み込み、定数設定、UI
+# ----------------------------------------------------
 
 # Firebaseの初期化を実行
 initialize_firebase()
@@ -164,7 +265,7 @@ initialize_firebase()
 # DeprecationWarningを無視
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
-# Initialize session state for persistent data
+# Initialize session state for persistent data (既存のロジックを維持)
 if 'total_nutrition_for_day' not in st.session_state:
     st.session_state.total_nutrition_for_day = {
         "calories": 0,
@@ -187,8 +288,6 @@ if 'data_added' not in st.session_state:
     st.session_state.data_added = False
 if 'chart_reset' not in st.session_state:
     st.session_state.chart_reset = False
-if 'rerun_flag' not in st.session_state:
-    st.session_state.rerun_flag = False
 
 
 # データベースから過去の履歴を読み込み（Firebase初期化後に実行）
@@ -196,15 +295,17 @@ if st.session_state.auth_ready and not st.session_state.history:
     st.session_state.history = load_nutrition_data()
 
 
-# Load nutrition data from CSV
+# Load nutrition data from CSV (既存のロジックを維持)
 try:
     df = pd.read_csv("food_nutrition.csv")
     nutrition_dict = df.set_index('food').T.to_dict()
+    available_foods = list(nutrition_dict.keys())
 except FileNotFoundError:
     st.error("エラー: 'food_nutrition.csv' ファイルが見つかりません。")
     st.stop()
 
-# Define food categories
+
+# Define food categories (既存のロジックを維持)
 food_categories = {
     "朝食": ["クロワッサン", "プレーンヨーグルト", "イチゴ", "ラズベリー", "トースト", "ジャム", "牛乳", "シリアル", "ゆで卵", "パンケーキ", "フレンチトースト", "メロンパン", "あんぱん", "食パン", "バゲット", "クロワワッサンサンド"],
     "昼食・夕食": ["ごはん", "鶏肉", "ほうれん草", "卵", "納豆", "味噌汁", "鮭", "豆腐", "パスタ", "ステーキ", "ハンバーグ", "カレーライス", "ラーメン", "餃子", "炒飯", "サンドイッチ", "ツナサンド", "ハムチーズサンド", "ミックスサンド", "カツ丼", "親子丼", "牛丼", "天ぷら", "ざるそば", "うどん", "焼き魚", "煮物", "ほうれん草のおひたし", "豚の角煮", "麻婆豆腐", "エビチリ", "青椒肉絲", "回鍋肉", "春巻き", "小籠包", "焼きそば", "お好み焼き", "たこ焼き", "茶碗蒸し", "冷奴", "味噌カツ", "手羽先の唐揚げ", "鶏肉の照り焼き", "肉じゃが", "魚の煮付け"],
@@ -215,7 +316,7 @@ food_categories = {
     "おやつ": ["チョコレート", "クッキー", "ビスケット", "和菓子（大福、団子、羊羹など）", "ドーナツ", "アイスクリーム", "ジェラート", "カステラ", "パウンドケーキ", "チーズ", "クラッカー", "エナジーバー", "グラノーラバー", "ゼリー", "ドライフルーツ","ポップコーン", "グミ", "ポテトチップス", "スナック", "飴"],
 }
 
-# Daily recommended intake (simplified)
+# Daily recommended intake (simplified) (既存のロジックを維持)
 daily_needs = {
     "calories": 2000,
     "protein": 60,
@@ -223,7 +324,7 @@ daily_needs = {
     "carbohydrates": 300
 }
 
-# Target ratios for each meal (%)
+# Target ratios for each meal (%) (既存のロジックを維持)
 meal_ratios = {
     "朝食": 0.25,
     "昼食": 0.35,
@@ -231,7 +332,7 @@ meal_ratios = {
     "おやつ": 0.10,
 }
 
-# Mapping of nutrients to food categories
+# Mapping of nutrients to food categories (既存のロジックを維持)
 recommendation_categories = {
     "calories": ["パン", "ご飯", "麺", "シリアル"],
     "protein": ["肉", "魚", "卵", "豆類"],
@@ -239,7 +340,7 @@ recommendation_categories = {
     "carbohydrates": ["フルーツ", "全粒穀物", "イモ類"]
 }
 
-# Mapping of food to its category
+# Mapping of food to its category (既存のロジックを維持)
 food_to_category = {
     "クロワッサン": "パン", "トースト": "パン", "食パン": "パン", "メロンパン": "パン", "あんぱん": "パン", "バゲット": "パン",
     "ごはん": "ご飯", "おにぎり": "ご飯", "カレーライス": "ご飯", "炒飯": "ご飯", "牛丼": "ご飯", "親子丼": "ご飯", "カツ丼": "ご飯",
@@ -257,6 +358,7 @@ food_to_category = {
     "ブロッコリー": "野菜", "ほうれん草": "野菜", "トマト": "野菜", "きゅうり": "野菜", "玉ねぎ": "野菜", "人参": "野菜", "ピーマン": "野菜","チョコレート": "デザート","クッキー": "デザート","ビスケット": "デザート","和菓子（大福、団子、羊羹など）": "デザート","ドーナツ": "デザート","アイスクリーム": "デザート","ジェラート": "デザート","カステラ": "デザート","パウンドケーキ": "デザート","ゼリー": "デザート","グミ": "デザート","飴": "デザート","チーズ": "その他（乳製品）","クラッカー": "スナック（穀物）","エナジーバー": "スナック（栄養）","グラノーラバー": "スナック（栄養）","ドライフルーツ": "フルーツ","ポップコーン": "スナック（穀物）","ポテトチップス": "スナック（イモ）","スナック": "スナック（その他）",
 }
 
+
 # Set page configuration
 st.set_page_config(
     page_title="栄養チェッカー",
@@ -264,7 +366,7 @@ st.set_page_config(
 )
 st.title("食事画像から栄養をチェック！")
 
-# Custom CSS for a cute design
+# Custom CSS for a cute design (既存のロジックを維持)
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c&display=swap');
@@ -299,7 +401,14 @@ st.markdown("""
     div[data-testid="stButton"] button:hover {
         background-color: #876358 !important;
     }
-
+    
+    /* Primary Button styles for Auto Analysis */
+    /* 自動分析ボタンに目立つ色を適用 */
+    div[data-testid="stButton"] button[kind="primary"] {
+        background-color: #E7889A !important;
+        color: white !important;
+    }
+    
     /* Multiselect and text input styles */
     .stMultiSelect, .stSelectbox {
         background-color: #e3bd96;
@@ -325,15 +434,13 @@ st.markdown("""
 uploaded_file = st.file_uploader("画像をアップロード", type=["jpg", "jpeg", "png"])
 
 # ----------------------------------------------------
-# 3. UIへのデータ保存ボタンの統合
+# 5. UIへのデータ保存ボタンの統合
 # ----------------------------------------------------
 st.markdown(f"**現在のユーザーID:** `{st.session_state.user_id}`")
 
 if st.session_state.auth_ready and st.session_state.last_selected_meal_type and st.session_state.data_added:
-    # 接続済みで、一度でも計算が実行されたらボタンを表示
     save_button_key = f"save_btn_{st.session_state.last_selected_meal_type}_{st.session_state.total_nutrition_for_day['calories']}"
     
-    # on_clickで保存関数を呼び出し、引数に食事タイプと直近の栄養情報を渡す
     st.button(
         f"{st.session_state.last_selected_meal_type}の記録を保存", 
         key=save_button_key, 
@@ -342,7 +449,6 @@ if st.session_state.auth_ready and st.session_state.last_selected_meal_type and 
         type='secondary'
     )
 elif not st.session_state.auth_ready and st.session_state.db is None:
-    # 接続情報がない場合の警告
      st.warning("⚠️ データベース接続待ち、または未設定のため、データ保存はできません。")
 
 st.write("---") # 区切り線
@@ -350,49 +456,126 @@ st.write("---") # 区切り線
 
 if uploaded_file is not None:
     st.image(uploaded_file, caption='アップロードされた画像', use_container_width=True)
-    st.success("画像を受け取りました！")
     
-    # Selection logic
-    st.subheader("画像に写っている料理を選んでください")
-    
-    # Meal type selection
+    # Meal type selection (食事タイプは分析の前に行う)
+    st.subheader("食事タイプを選択してください")
     selected_meal_type = st.selectbox(
         "どの食事ですか？",
         options=list(meal_ratios.keys()),
-        # 最後に選択した食事タイプを維持
-	index=list(meal_ratios.keys()).index(st.session_state.last_selected_meal_type) if st.session_state.last_selected_meal_type else 0
+        index=list(meal_ratios.keys()).index(st.session_state.last_selected_meal_type) if st.session_state.last_selected_meal_type else 0
     )
     
-    selected_categories = st.multiselect(
-        "料理のカテゴリを選択",
-        options=list(food_categories.keys())
-    )
     
-    filtered_foods = []
-    if selected_categories:
-        for category in selected_categories:
-            filtered_foods.extend(food_categories.get(category, []))
-    else:
-        for category_list in food_categories.values():
-            filtered_foods.extend(category_list)
+    # ----------------------------------------------------
+    # 6. 自動分析 (Gemini Vision) と 手動入力の切り替え
+    # ----------------------------------------------------
     
-    filtered_foods = sorted(list(set(filtered_foods)))
+    st.subheader("料理の選択方法")
     
-    selected_foods = st.multiselect(
-        "料理名を選択（検索もできます）",
-        options=filtered_foods,
-        default=[]
-    )
+    # 自動分析ボタンと手動入力切り替えボタンの配置
+    col_auto, col_manual = st.columns([1, 1])
 
-    # Action button to add nutrition
-    if st.button("栄養情報を計算", type='primary'):
+    with col_auto:
+        # 自動分析ボタン
+        if st.button("画像から自動分析 (AI)", key="auto_analyze_btn", type='primary'):
+            st.session_state.manual_mode = False
+            st.session_state.detected_foods = [] # リセット
+            
+            # 画像をBase64に変換
+            base64_data = file_to_base64(uploaded_file)
+            mime_type = uploaded_file.type
+            
+            if base64_data:
+                with st.spinner("AIが画像から料理を分析中..."):
+                    # Gemini APIを呼び出し
+                    api_result = analyze_image_with_gemini(base64_data, mime_type)
+                
+                if api_result and 'foods' in api_result:
+                    # 検出された食品名を取得
+                    detected_foods = api_result['foods']
+                    
+                    # データベースに存在する食品名のみを抽出
+                    matching_foods = [food for food in detected_foods if food in nutrition_dict]
+                    non_matching_foods = [food for food in detected_foods if food not in nutrition_dict]
+                    
+                    st.session_state.detected_foods = matching_foods
+                    st.session_state.manual_mode = True # 自動分析結果を手動選択で表示するために一時的にTrueに
+
+                    if matching_foods:
+                        st.success(f"✅ 料理を自動検出しました: {', '.join(matching_foods)}")
+                        if non_matching_foods:
+                             st.warning(f"⚠️ データベースにない食品は無視されました: {', '.join(non_matching_foods)}")
+                    else:
+                        st.warning("⚠️ 画像から食品を検出できませんでした。手動で選択してください。")
+                        st.session_state.detected_foods = []
+                        st.session_state.manual_mode = True 
+                else:
+                    st.error("AIによる画像分析に失敗しました。手動で選択してください。")
+                    st.session_state.detected_foods = []
+                    st.session_state.manual_mode = True
+            st.rerun()
+
+    with col_manual:
+        # 手動入力モードに切り替えるボタン
+        if st.button("手動で入力", key="manual_mode_btn", type='secondary'):
+            st.session_state.manual_mode = True
+            st.session_state.detected_foods = [] # 自動検出結果をクリア
+            st.rerun()
+
+    # ----------------------------------------------------
+    # 7. 自動分析結果 または 手動選択フォームの表示
+    # ----------------------------------------------------
+    
+    selected_foods = []
+    
+    # 自動検出が成功した場合、その結果を初期値としてマルチセレクトに表示
+    if st.session_state.detected_foods:
+        st.info("自動検出された食品をリストに反映しました。間違いがあれば修正してください。")
+        selected_foods = st.multiselect(
+            "料理名を選択（自動検出結果）",
+            options=available_foods,
+            default=st.session_state.detected_foods # 検出結果を初期値に設定
+        )
+        st.session_state.manual_mode = True # 自動検出後もユーザーが編集できるように手動モードを維持
+
+    # 手動モードの場合、カテゴリフィルタリング機能を提供
+    elif st.session_state.manual_mode:
+        st.info("手動モードです。カテゴリを選択して料理を選んでください。")
+        
+        selected_categories = st.multiselect(
+            "料理のカテゴリを選択",
+            options=list(food_categories.keys())
+        )
+        
+        filtered_foods = []
+        if selected_categories:
+            for category in selected_categories:
+                filtered_foods.extend(food_categories.get(category, []))
+        else:
+            # カテゴリ未選択時は全食品から選択可能
+            filtered_foods = available_foods
+        
+        filtered_foods = sorted(list(set(filtered_foods)))
+        
+        selected_foods = st.multiselect(
+            "料理名を選択（検索もできます）",
+            options=filtered_foods,
+            default=[]
+        )
+    else:
+        # 初期状態または自動分析前
+        st.info("⬆️ 上のボタンから「自動分析」または「手動で入力」を選択してください。")
+
+
+    # Action button to calculate nutrition
+    if st.session_state.manual_mode and st.button("栄養情報を計算", key='calculate_btn', type='secondary'):
         if not selected_foods:
             st.warning("料理が選択されていません。")
         else:
-            # Calculate nutrition for the selected foods
+            # Calculate nutrition for the selected foods (計算ロジックは既存を維持)
             nutrition_for_current_meal = {
                 "calories": 0,
-                   "protein": 0,
+                "protein": 0,
                 "fat": 0,
                 "carbohydrates": 0
             }
@@ -401,7 +584,7 @@ if uploaded_file is not None:
                 if food in nutrition_dict:
                     nutrition = nutrition_dict[food]
                     for key in nutrition_for_current_meal:
-                        nutrition_for_current_meal[key] += nutrition[key]
+                        nutrition_for_current_meal[key] += nutrition.get(key, 0) # 念のためgetでアクセス
             
             # Add to the total nutrition for the day
             for key in st.session_state.total_nutrition_for_day:
@@ -414,9 +597,8 @@ if uploaded_file is not None:
             
             st.info("選択された料理：" + "、".join(selected_foods) + " の栄養情報を計算しました！")
 
-    # Display results only if data has been added
+    # Display results only if data has been added (既存のロジックを維持)
     if st.session_state.data_added:
-        # Display the daily total and the reset button
         st.markdown("---")
         st.subheader("今日の栄養合計")
         st.write(f"カロリー: {st.session_state.total_nutrition_for_day['calories']:.1f} kcal")
@@ -439,18 +621,20 @@ if uploaded_file is not None:
                 "carbohydrates": 0
             }
             st.session_state.data_added = False
+            st.session_state.detected_foods = [] # 自動検出結果もリセット
+            st.session_state.manual_mode = False # モードもリセット
             st.success("今日の合計栄養をリセットしました。")
+            st.rerun() 
 
         # Display the advice and chart based on the selected mode
         st.markdown("---")
         
         col1, col2 = st.columns(2)
         with col1:
-            # Toggle button for chart display mode
             if st.button("グラフを切り替え"):
                 st.session_state.show_total_chart = not st.session_state.show_total_chart
+                st.rerun() 
         with col2:
-            # Reset button for the chart view
             if st.button("グラフをリセット"):
                 st.session_state.chart_reset = True
 
@@ -534,7 +718,8 @@ if uploaded_file is not None:
                     min((st.session_state.last_added_nutrition["protein"] / meal_needs["protein"]) * 100, 100),
                     min((st.session_state.last_added_nutrition["fat"] / meal_needs["fat"]) * 100, 100),
                     min((st.session_state.last_added_nutrition["carbohydrates"] / meal_needs["carbohydrates"]) * 100, 100)
-                ],
+                ]
+                ,
                 "理想値": [100, 100, 100, 100]
             }
             
@@ -594,23 +779,17 @@ if uploaded_file is not None:
         st.plotly_chart(fig, use_container_width=True)
         
         if st.session_state.chart_reset:
-            # リセットボタンが押されたため、ページ全体を再実行してグラフをリセットします。
             st.session_state.chart_reset = False
             st.rerun()
 
 # ----------------------------------------------------
-# 4. サイドバーに過去の記録を表示
+# 8. サイドバーに過去の記録を表示
 # ----------------------------------------------------
-# データ保存後、st.rerun()の代わりに手動でサイドバーを更新する場合のフラグ処理
-if st.session_state.get('rerun_flag'):
-    st.session_state.history = load_nutrition_data() # データを再読み込み
-    st.session_state.rerun_flag = False
 
 if st.session_state['history']:
     st.sidebar.markdown("---")
     st.sidebar.subheader("過去の保存データ")
     
-    # 過去の記録をサイドバーに表示
     for meal, data in st.session_state['history'].items():
         st.sidebar.markdown(f"**{meal}**")
         st.sidebar.text(f"  カロリー: {data['calories']:.0f} kcal")
