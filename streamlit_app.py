@@ -126,8 +126,7 @@ def save_nutrition_data(meal_type, nutrition_data):
         doc_ref.set(data_to_save)
         st.session_state.history[meal_type] = nutrition_data # 履歴も更新
         st.success(f"✅ {meal_type}の栄養データをクラウドに保存しました！")
-        st.session_state.data_added = True # 保存後、グラフを再表示するため
-          st.session_state.rerun_flag = True # グラフの再描画を促すフラグ
+        st.session_state.data_added = True # 保存後、グラフを再表示するため	st.session_state.rerun_flag = True # グラフの再描画を促すフラグ
 
     except Exception as e:
         st.error(f"データ保存中にエラーが発生しました: {e}")
