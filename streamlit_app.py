@@ -104,7 +104,7 @@ def analyze_image_with_gemini(base64_image_data, mime_type):
             print(f"API呼び出しエラー (試行 {attempt + 1}/5): {e}") # コンソールにエラーログを出力
             if attempt < 4:
                 import time
-                time.sleep(2 ** attempt) 
+                time.sleep(2 ** attempt)  
             else:
                 st.error("🔴 画像分析APIの呼び出しが最大試行回数に達しました。")
                 return None
@@ -114,7 +114,7 @@ def analyze_image_with_gemini(base64_image_data, mime_type):
 
 
 # ----------------------------------------------------
-# 3. StreamlitのセッションステートとFirebase初期化 (既存ロジック)
+# 3. StreamlitのセッションステートとFirebase初期化
 # ----------------------------------------------------
 
 # Firebase関連のセッションステートを初期化
@@ -189,7 +189,7 @@ def initialize_firebase():
     st.session_state.db = None
     st.session_state.auth_ready = False
 
-# データ保存・読み込み機能の定義 (ここは変更なし)
+# データ保存・読み込み機能の定義
 def save_nutrition_data(meal_type, nutrition_data):
     """Firestoreに栄養データを保存する"""
     if not st.session_state.auth_ready:
@@ -199,6 +199,8 @@ def save_nutrition_data(meal_type, nutrition_data):
     try:
         # ドキュメント参照パスを決定 (ここではユーザーIDごとのプライベートコレクションを使用)
         # collection path: /users/{userId}/nutrition_logs
+        # Canvasのガイドラインに基づき、コレクションパスは /artifacts/{appId}/users/{userId}/{your_collection_name} とすべきですが、
+        # Streamlitでは__app_idが使えないため、既存のユーザーIDベースのパスを使用します。
         doc_ref = st.session_state.db.collection(f"users/{st.session_state.user_id}/nutrition_logs").document()
         
         data_to_save = {
@@ -241,12 +243,12 @@ def load_nutrition_data():
             # タイムスタンプで最新かどうかを判断（ここでは簡易的に）
             if meal_type not in history_data or data.get("timestamp", 0) > history_data[meal_type].get("timestamp", 0):
                  history_data[meal_type] = {
-                    "calories": data.get("calories", 0),
-                    "protein": data.get("protein", 0),
-                    "fat": data.get("fat", 0),
-                    "carbohydrates": data.get("carbohydrates", 0),
-                    "timestamp": data.get("timestamp", None)
-                }
+                     "calories": data.get("calories", 0),
+                     "protein": data.get("protein", 0),
+                     "fat": data.get("fat", 0),
+                     "carbohydrates": data.get("carbohydrates", 0),
+                     "timestamp": data.get("timestamp", None)
+                 }
         
         return history_data
     except Exception as e:
@@ -305,8 +307,17 @@ try:
     nutrition_dict = df_cleaned.set_index('food').T.to_dict()
     available_foods = list(nutrition_dict.keys())
 except FileNotFoundError:
-    st.error("エラー: 'food_nutrition.csv' ファイルが見つかりません。")
-    st.stop()
+    # 🌟 修正: CSVファイルがない場合にクラッシュするのを防ぐため、ダミーデータを設定
+    st.error("エラー: 'food_nutrition.csv' ファイルが見つかりません。デモデータを使用してアプリを続行します。")
+    nutrition_dict = {
+        "ごはん": {"calories": 168, "protein": 2.5, "fat": 0.3, "carbohydrates": 37.1},
+        "鶏肉": {"calories": 145, "protein": 23.0, "fat": 3.5, "carbohydrates": 0.0},
+        "ブロッコリー": {"calories": 33, "protein": 4.3, "fat": 0.3, "carbohydrates": 5.2},
+        "ゆで卵": {"calories": 76, "protein": 6.3, "fat": 5.3, "carbohydrates": 0.2},
+        "リンゴ": {"calories": 54, "protein": 0.2, "fat": 0.1, "carbohydrates": 14.1},
+    }
+    available_foods = list(nutrition_dict.keys())
+    # st.stop() を削除し、アプリを続行させる
 
 
 # Define food categories (既存のロジックを維持)
@@ -453,7 +464,7 @@ if st.session_state.auth_ready and st.session_state.last_selected_meal_type and 
         type='secondary'
     )
 elif not st.session_state.auth_ready and st.session_state.db is None:
-     st.warning("⚠️ データベース接続待ち、または未設定のため、データ保存はできません。")
+      st.warning("⚠️ データベース接続待ち、または未設定のため、データ保存はできません。")
 
 st.write("---") # 区切り線
 
@@ -466,7 +477,7 @@ if uploaded_file is not None:
     selected_meal_type = st.selectbox(
         "どの食事ですか？",
         options=list(meal_ratios.keys()),
-        index=list(meal_ratios.keys()).index(st.session_state.last_selected_meal_type) if st.session_state.last_selected_meal_type else 0
+        index=list(meal_ratios.keys()).index(st.session_state.last_selected_meal_type) if st.session_state.last_selected_meal_type in meal_ratios else 0
     )
     
     
@@ -508,7 +519,7 @@ if uploaded_file is not None:
                     if matching_foods:
                         st.success(f"✅ 料理を自動検出しました: {', '.join(matching_foods)}")
                         if non_matching_foods:
-                             st.warning(f"⚠️ データベースにない食品は無視されました: {', '.join(non_matching_foods)}")
+                            st.warning(f"⚠️ データベースにない食品は無視されました: {', '.join(non_matching_foods)}")
                     else:
                         st.warning("⚠️ 画像から食品を検出できませんでした。手動で選択してください。")
                         st.session_state.detected_foods = []
@@ -554,6 +565,7 @@ if uploaded_file is not None:
         filtered_foods = []
         if selected_categories:
             for category in selected_categories:
+                # 辞書に存在しないカテゴリが選択された場合でもエラーにならないようにgetを使用
                 filtered_foods.extend(food_categories.get(category, []))
         else:
             # カテゴリ未選択時は全食品から選択可能
