@@ -3,3 +3,4 @@ pandas
 plotly
 Pillow
 firebase-admin
+requests
