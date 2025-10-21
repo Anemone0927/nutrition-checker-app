@@ -30,7 +30,8 @@ except ImportError as e:
 # 2. Gemini API の設定
 # ----------------------------------------------------
 API_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
-API_KEY = "" # Canvas環境では実行時に自動で提供されます
+# 修正: Streamlit SecretsからAPIキーを取得
+API_KEY = st.secrets.get("gemini_api_key", "") # Canvas環境では実行時に自動で提供されます
 
 def file_to_base64(uploaded_file):
     """UploadedFileオブジェクトをBase64文字列に変換する"""
@@ -41,6 +42,11 @@ def analyze_image_with_gemini(base64_image_data, mime_type):
     """Gemini APIを呼び出し、画像から食品名をJSON形式で検出する"""
     if requests is None or json is None:
         st.error("API呼び出しに必要なライブラリがロードされていません。")
+        return None
+    
+    # 修正: APIキーのチェックを追加
+    if not API_KEY:
+        st.error("🔴 APIキーが設定されていません。`st.secrets`または環境変数を確認してください。")
         return None
     
     # 応答JSONのスキーマ定義
@@ -445,8 +451,25 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# File uploader
-uploaded_file = st.file_uploader("画像をアップロード", type=["jpg", "jpeg", "png"])
+# File uploader and Camera Input
+st.subheader("撮影またはアップロード")
+
+# Streamlitのカメラ機能
+# カメラが利用可能な環境（主にスマホやPCのWebカメラ）で、このウィジェットが表示される
+camera_photo = st.camera_input("📸 カメラで食事を撮影") 
+
+st.markdown("---") # 区切り線
+
+# ファイルアップロード機能 (予備として残しておく)
+uploaded_file = st.file_uploader("📂 または、画像をアップロード", type=["jpg", "jpeg", "png"])
+
+# 撮影された画像またはアップロードされたファイルのどちらかを使用する
+if camera_photo is not None:
+    # カメラで撮影した画像を優先
+    final_input_file = camera_photo
+else:
+    # カメラで撮っていなければ、アップロードされた画像を使う
+    final_input_file = uploaded_file
 
 # ----------------------------------------------------
 # 5. UIへのデータ保存ボタンの統合
@@ -469,8 +492,8 @@ elif not st.session_state.auth_ready and st.session_state.db is None:
 st.write("---") # 区切り線
 
 
-if uploaded_file is not None:
-    st.image(uploaded_file, caption='アップロードされた画像', use_container_width=True)
+if final_input_file is not None: # ★★★ ここはOK ★★★
+    st.image(final_input_file, caption='分析対象の画像', use_container_width=True)    
     
     # Meal type selection (食事タイプは分析の前に行う)
     st.subheader("食事タイプを選択してください")
@@ -493,12 +516,18 @@ if uploaded_file is not None:
     with col_auto:
         # 自動分析ボタン
         if st.button("画像から自動分析 (AI)", key="auto_analyze_btn", type='primary'):
+            # 修正: APIキーがない場合は処理を中断
+            if not API_KEY:
+                st.error("🔴 APIキーが見つからないため、自動分析を実行できません。")
+                st.session_state.manual_mode = True # 手動入力に切り替える
+                st.rerun()
+                
             st.session_state.manual_mode = False
             st.session_state.detected_foods = [] # リセット
             
             # 画像をBase64に変換
-            base64_data = file_to_base64(uploaded_file)
-            mime_type = uploaded_file.type
+            base64_data = file_to_base64(final_input_file)
+            mime_type = final_input_file.type
             
             if base64_data:
                 with st.spinner("AIが画像から料理を分析中..."):
