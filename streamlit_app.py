@@ -33,8 +33,7 @@ except ImportError as e:
 # ----------------------------------------------------
 # 2. Gemini API の設定
 # ----------------------------------------------------
-# gemini-1.5-flash ではなく gemini-2.0-flash か gemini-3-flash を試します
-API_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+API_URL_BASE = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
 # Streamlit SecretsからAPIキーを取得
 API_KEY = st.secrets.get("gemini_api_key", "") 
 
