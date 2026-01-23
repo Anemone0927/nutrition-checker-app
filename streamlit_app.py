@@ -91,7 +91,7 @@ def analyze_image_with_gemini(base64_image_data, mime_type):
         except Exception as e:
             print(f"API呼び出しエラー (試行 {attempt + 1}/3): {e}")
             import time
-            time.sleep(1)
+            time.sleep(5)
             
     return None
 
