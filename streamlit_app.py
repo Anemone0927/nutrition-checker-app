@@ -61,9 +61,7 @@ def analyze_image_with_gemini(base64_image_data, mime_type):
                 }
             ]
         }],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-        }
+        "generationConfig": {}
     }
     
     # 試行回数を3回にして、エラー時に詳細を表示するように改良
