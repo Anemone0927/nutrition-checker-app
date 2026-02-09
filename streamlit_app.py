@@ -1,9 +1,24 @@
 import warnings
+import sys
 import streamlit as st
 import pandas as pd
 import random
 import plotly.graph_objects as go
 from PIL import Image
+import base64
+import json
+
+from transformers import BlipProcessor, BlipForConditionalGeneration
+import torch
+from PIL import Image
+import io
+
+
+def file_to_base64(uploaded_file):
+    if uploaded_file is None:
+        return None
+    return base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+
 
 # ----------------------------------------------------
 # 1. Firebase Admin SDK のインポートと初期化
@@ -31,66 +46,44 @@ except ImportError as e:
 
 
 # ----------------------------------------------------
-# 2. Gemini API の設定
+# 2. BLIP
 # ----------------------------------------------------
-API_URL_BASE = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
-# Streamlit SecretsからAPIキーを取得
-API_KEY = st.secrets.get("gemini_api_key", "") 
+@st.cache_resource
+def load_blip_model():
+    processor = BlipProcessor.from_pretrained(
+        "Salesforce/blip-image-captioning-base"
+    )
+    model = BlipForConditionalGeneration.from_pretrained(
+        "Salesforce/blip-image-captioning-base"
+    )
+    return processor, model
 
-def file_to_base64(uploaded_file):
-    """UploadedFileオブジェクトをBase64文字列に変換する"""
-    if base64 is None: return None
-    return base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
+processor, blip_model = load_blip_model()
 
-def analyze_image_with_gemini(base64_image_data, mime_type):
-    """Gemini APIを呼び出し、画像から食品名を検出する（エラー回避・安定版）"""
-    if not API_KEY:
-        st.warning("🔴 APIキーが設定されていません。")
+def analyze_image_with_blip(uploaded_file):
+    try:
+        image = Image.open(
+            io.BytesIO(uploaded_file.getvalue())
+        ).convert("RGB")
+
+        inputs = processor(image, return_tensors="pt")
+        output = blip_model.generate(
+            **inputs,
+            max_new_tokens=30
+        )
+
+        caption = processor.decode(
+            output[0],
+            skip_special_tokens=True
+        )
+
+        return {
+            "caption": caption
+        }
+
+    except Exception as e:
+        st.error(f"❌ BLIP解析エラー: {e}")
         return None
-    
-    # 400エラーを防ぐため、一番シンプルな構造に変更
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": "画像に写っている食べ物を特定し、以下のJSON形式でのみ答えてください。余計な解説は不要です。\n\n{'foods': ['食品名1', '食品名2']}"},
-                {
-                    "inlineData": {
-                        "mimeType": mime_type,
-                        "data": base64_image_data
-                    }
-                }
-            ]
-        }],
-        "generationConfig": {}
-    }
-    
-    # 試行回数を3回にして、エラー時に詳細を表示するように改良
-    for attempt in range(3):
-        try:
-            # 修正ポイント: data=json.dumps ではなく json=payload を使用
-            response = requests.post(
-                f"{API_URL_BASE}?key={API_KEY}",
-                headers={'Content-Type': 'application/json'},
-                json=payload, 
-                timeout=30
-            )
-            
-            if response.status_code != 200:
-                # 失敗した場合、Googleからの本当のダメ出し理由をターミナルに表示
-                print(f"DEBUG エラー内容: {response.text}")
-                response.raise_for_status()
-            
-            result = response.json()
-            if 'candidates' in result:
-                json_text = result['candidates'][0]['content']['parts'][0]['text']
-                return json.loads(json_text)
-                
-        except Exception as e:
-            print(f"API呼び出しエラー (試行 {attempt + 1}/3): {e}")
-            import time
-            time.sleep(15)
-            
-    return None
 
 
 # ----------------------------------------------------
@@ -445,83 +438,88 @@ if final_input_file is not None:
     selected_meal_type = st.selectbox(
         "どの食事ですか？",
 options=list(meal_ratios.keys()),index=list(meal_ratios.keys()).index(st.session_state.last_selected_meal_type) if st.session_state.last_selected_meal_type in meal_ratios else 0
-    )    # ----------------------------------------------------
-    # 6. 自動分析 (Gemini Vision) と 手動入力の切り替え
-    # ----------------------------------------------------
+    )
+# ----------------------------------------------------
+# 6. 自動分析 (BLIP) と 手動入力の切り替え
+# ----------------------------------------------------
     st.subheader("料理の選択方法")
+
     col_auto, col_manual = st.columns([1, 1])
-    with col_auto:
-        # 自動分析ボタン
+
+with col_auto:
         if st.button("画像から自動分析 (AI)", key="auto_analyze_btn", type='primary'):
-            if not API_KEY:
-                st.error("🔴 APIキーが見つからないため、自動分析を実行できません。手動で入力してください。")
-                st.session_state.manual_mode = True # 手動入力に切り替える
-                st.session_state.detected_foods = []
-                st.rerun()      
-            st.session_state.manual_mode = False # 一旦自動分析モードに設定
-            st.session_state.detected_foods = [] # リセット
-            base64_data = file_to_base64(final_input_file)
-            mime_type = final_input_file.type
-            if base64_data:
-                with st.spinner("AIが画像から料理を分析中..."):
-                    api_result = analyze_image_with_gemini(base64_data, mime_type)
-                if api_result and 'foods' in api_result:
-                    detected_foods = api_result['foods']
-                    matching_foods = [food for food in detected_foods if food in nutrition_dict]
-                    non_matching_foods = [food for food in detected_foods if food not in nutrition_dict]
-                    st.session_state.detected_foods = matching_foods
-                    st.session_state.manual_mode = True # ユーザーが編集できるように手動モードに移行
-                    if matching_foods:
-                        st.success(f"✅ 料理を自動検出しました: {', '.join(matching_foods)}")
-                        if non_matching_foods:
-                            st.warning(f"⚠️ データベースにない食品は無視されました: {', '.join(non_matching_foods)}")
-                    else:
-                        st.warning("⚠️ 画像から食品を検出できませんでした。手動で選択してください。")
-                        st.session_state.detected_foods = []
-                        st.session_state.manual_mode = True 
+            st.session_state.manual_mode = False
+            st.session_state.detected_foods = []
+
+            with st.spinner("AIが画像を解析中..."):
+                api_result = analyze_image_with_blip(final_input_file)
+
+            if api_result and "caption" in api_result:
+                caption = api_result["caption"].lower()
+                # 🛠 ここでAIが何て言ったか確認できるようにします
+                st.write(f"🔍 AIの解析結果(原文): `{caption}`") 
+
+                # 翻訳マップ（ここにある英単語がAIの言葉に含まれていれば、日本語に変換）
+                translate_hints = {
+                    "rice": "ごはん", "chicken": "鶏肉", "egg": "ゆで卵", 
+                    "broccoli": "ブロッコリー", "bread": "食パン", "apple": "リンゴ",
+                    "coffee": "コーヒー", "salad": "サラダ", "steak": "ステーキ",
+                    "pasta": "パスタ", "fish": "鮭", "sandwich": "サンドイッチ",
+                    "toast": "トースト", "croissant": "クロワッサン"
+                }
+                
+                detected = []
+                # AIの結果文の中に、ヒントの英単語が含まれているかチェック
+                for eng, jpn in translate_hints.items():
+                    if eng in caption: # 文章の中に単語があればOK
+                        if jpn in available_foods: # かつ、あなたのCSV/リストにあれば採用
+                            detected.append(jpn)
+
+                # もし何も見つからなかった時のための予備
+                if not detected:
+                    st.warning("⚠️ あなたの料理リストに一致する単語が見つかりませんでした。")
                 else:
-                    st.error("AIによる画像分析に失敗しました。手動で選択してください。")
-                    st.session_state.detected_foods = []
-                    st.session_state.manual_mode = True
-            st.rerun()
-    with col_manual:
-        # 手動入力モードに切り替えるボタン
-        if st.button("手動で入力", key="manual_mode_btn", type='secondary'):
-            st.session_state.manual_mode = True
-            st.session_state.detected_foods = [] # 自動検出結果をクリア
-            st.rerun()
-    # ----------------------------------------------------
-    # 7. 自動分析結果 または 手動選択フォームの表示
-    # ----------------------------------------------------
+                    st.success(f"🤖 {len(detected)}個の料理を特定しました！")
+
+                st.session_state.detected_foods = list(set(detected))
+                st.session_state.manual_mode = True
+                st.rerun()
+
+# ----------------------------------------------------
+# 7. 自動分析結果 または 手動選択フォームの表示
+# ----------------------------------------------------
+    st.markdown("---")
     selected_foods = []
-    if st.session_state.detected_foods:
-        # 自動検出が成功し、結果がある場合
-        st.info("自動検出された食品をリストに反映しました。間違いがあれば修正してください。")
-        selected_foods = st.multiselect(
-            "料理名を選択（自動検出結果）",
-            options=available_foods,
-            default=st.session_state.detected_foods 
-        )
-    elif st.session_state.manual_mode:
-        # 手動モードの場合
-        st.info("手動モードです。カテゴリを選択して料理を選んでください。")
-        selected_categories = st.multiselect(
-            "料理のカテゴリを選択",
-            options=list(food_categories.keys())
-        )
-        filtered_foods = []
-        if selected_categories:
-            for category in selected_categories:
-                filtered_foods.extend(food_categories.get(category, []))
+
+    if st.session_state.manual_mode:
+        if st.session_state.detected_foods:
+            st.info("💡 AIがあなたのリストから料理を見つけました！")
+            selected_foods = st.multiselect(
+                "料理名を確認・選択",
+                options=available_foods, # ここであなたの全リストが使われます
+                default=st.session_state.detected_foods
+            )
         else:
-            # カテゴリ未選択時は全食品から選択可能
-            filtered_foods = available_foods
-        filtered_foods = sorted(list(set(filtered_foods)))
-        selected_foods = st.multiselect(
-            "料理名を選択（検索もできます）",
-            options=filtered_foods,
-            default=[]
-        )
+            # 手動モードの時、あなたが苦労して作った「food_categories」がここで火を吹きます！
+            st.info("📝 カテゴリから選んでください。")
+            selected_categories = st.multiselect(
+                "料理のカテゴリを選択",
+                options=list(food_categories.keys()) # あなたのカテゴリリスト
+            )
+            
+            filtered_foods = []
+            if selected_categories:
+                for category in selected_categories:
+                    filtered_foods.extend(food_categories.get(category, []))
+                filtered_foods = sorted(list(set(filtered_foods)))
+            else:
+                filtered_foods = available_foods
+                
+            selected_foods = st.multiselect(
+                "料理名を選択",
+                options=filtered_foods,
+                default=[]
+            )    
     else:
         # 初期状態または自動分析前
         st.info("⬆️ 上のボタンから「自動分析」または「手動で入力」を選択してください。")
